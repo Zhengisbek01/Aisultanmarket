@@ -1,18 +1,24 @@
 import { useState } from 'react'
 import BarcodeScanner from './BarcodeScanner.jsx'
 import {
-  getProducts, upsertProduct, deleteProduct,
-  addPurchase, getPurchases,
-  getDebts, addDebt, toggleDebtPaid, deleteDebt,
-  getReport, formatKZT,
+  useProducts, upsertProduct, deleteProduct,
+  usePurchases, addPurchase,
+  useDebts, addDebt, toggleDebtPaid, deleteDebt,
+  useSales, computeReport, refundSale, formatKZT,
 } from '../store.js'
 
-const TABS = ['Отчёт', 'Товары', 'Приход', 'Долги']
+const TABS = ['Отчёт', 'История', 'Товары', 'Приход', 'Долги']
 
 export default function AdminView() {
   const [tab, setTab] = useState('Отчёт')
+  const { data: products, error: productsError } = useProducts()
+  const { data: sales } = useSales()
+  const { data: purchases } = usePurchases()
+  const { data: debts } = useDebts()
+
   return (
     <div className="view">
+      {productsError && <div className="error-text">{productsError}</div>}
       <div className="tabs">
         {TABS.map(t => (
           <button key={t} className={`tab ${tab === t ? 'tab-active' : ''}`} onClick={() => setTab(t)}>
@@ -20,19 +26,20 @@ export default function AdminView() {
           </button>
         ))}
       </div>
-      {tab === 'Отчёт' && <ReportTab />}
-      {tab === 'Товары' && <ProductsTab />}
-      {tab === 'Приход' && <PurchasesTab />}
-      {tab === 'Долги' && <DebtsTab />}
+      {tab === 'Отчёт' && <ReportTab products={products} sales={sales} purchases={purchases} debts={debts} />}
+      {tab === 'История' && <HistoryTab products={products} sales={sales} />}
+      {tab === 'Товары' && <ProductsTab products={products} />}
+      {tab === 'Приход' && <PurchasesTab products={products} purchases={purchases} />}
+      {tab === 'Долги' && <DebtsTab debts={debts} />}
     </div>
   )
 }
 
 // ---------------- Отчёт ----------------
-function ReportTab() {
+function ReportTab({ products, sales, purchases, debts }) {
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
-  const r = getReport(from, to)
+  const r = computeReport(products, sales, purchases, debts, from, to)
 
   return (
     <div>
@@ -51,7 +58,7 @@ function ReportTab() {
         <Stat label="Нам должны" value={formatKZT(r.debtsOwedToUs)} tone="good" />
         <Stat label="Мы должны" value={formatKZT(r.debtsWeOwe)} tone="bad" />
       </div>
-      <p className="hint">Продаж за период: {r.salesCount}</p>
+      <p className="hint">Продаж за период: {r.salesCount}{r.refundedCount > 0 && ` · возвратов: ${r.refundedCount}`}</p>
       <h3>Последние продажи</h3>
       <div className="list">
         {[...r.sales].reverse().slice(0, 15).map(s => (
@@ -80,13 +87,62 @@ function Stat({ label, value, tone }) {
   )
 }
 
-// ---------------- Товары ----------------
-function ProductsTab() {
-  const [products, setProducts] = useState(getProducts())
-  const [scanning, setScanning] = useState(false)
-  const [form, setForm] = useState({ barcode: '', name: '', price: '', cost: '', weight: '', qty: '' })
+// ---------------- История продаж ----------------
+function HistoryTab({ products, sales }) {
+  const [search, setSearch] = useState('')
+  const [refundingId, setRefundingId] = useState(null)
 
-  function refresh() { setProducts(getProducts()) }
+  const filtered = [...sales]
+    .filter(s => !search.trim() || s.name.toLowerCase().includes(search.toLowerCase()) || (s.sellerName || '').toLowerCase().includes(search.toLowerCase()))
+    .reverse()
+
+  async function handleRefund(sale) {
+    if (!confirm(`Отменить продажу «${sale.name}» × ${sale.qty} на сумму ${formatKZT(sale.total)}? Товар вернётся на склад, связанный долг будет удалён.`)) return
+    setRefundingId(sale.id)
+    await refundSale(sale, products)
+    setRefundingId(null)
+  }
+
+  return (
+    <div>
+      <input
+        className="input"
+        placeholder="Поиск по названию товара или продавцу"
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+      />
+      <p className="hint">Всего продаж: {filtered.length}</p>
+      <div className="list">
+        {filtered.map(s => (
+          <div className="list-row-full" key={s.id}>
+            <div>
+              <b className={s.refunded ? 'paid' : ''}>{s.name} × {s.qty} — {formatKZT(s.total)}</b>
+              <div className="hint">
+                {new Date(s.date).toLocaleString('ru-RU')} · {s.sellerName || '—'}
+                {s.paymentType === 'cash' && ' · 💵'}
+                {s.paymentType === 'card' && ' · 💳'}
+                {s.paymentType === 'debt' && ` · 📝 ${s.debtor}`}
+                {s.refunded && ' · ↩️ возвращено'}
+              </div>
+            </div>
+            {!s.refunded && (
+              <button className="btn btn-danger btn-sm" disabled={refundingId === s.id} onClick={() => handleRefund(s)}>
+                {refundingId === s.id ? '...' : '↩️ Возврат'}
+              </button>
+            )}
+          </div>
+        ))}
+        {filtered.length === 0 && <p className="hint">Продаж не найдено</p>}
+      </div>
+    </div>
+  )
+}
+
+// ---------------- Товары ----------------
+function ProductsTab({ products }) {
+  const [scanning, setScanning] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [form, setForm] = useState({ barcode: '', name: '', price: '', cost: '', weight: '', qty: '' })
 
   function handleScan(code, err) {
     setScanning(false)
@@ -94,10 +150,11 @@ function ProductsTab() {
     setForm(f => ({ ...f, barcode: code }))
   }
 
-  function saveProduct(e) {
+  async function saveProduct(e) {
     e.preventDefault()
     if (!form.barcode || !form.name || !form.price) return
-    upsertProduct({
+    setSaving(true)
+    await upsertProduct({
       barcode: form.barcode,
       name: form.name,
       price: Number(form.price),
@@ -105,8 +162,8 @@ function ProductsTab() {
       weight: form.weight,
       qty: Number(form.qty) || 0,
     })
+    setSaving(false)
     setForm({ barcode: '', name: '', price: '', cost: '', weight: '', qty: '' })
-    refresh()
   }
 
   function editProduct(p) {
@@ -116,9 +173,8 @@ function ProductsTab() {
     })
   }
 
-  function remove(barcode) {
-    deleteProduct(barcode)
-    refresh()
+  async function remove(barcode) {
+    await deleteProduct(barcode)
   }
 
   return (
@@ -143,7 +199,9 @@ function ProductsTab() {
           <input className="input" placeholder="Остаток, шт" type="number" value={form.qty}
             onChange={e => setForm({ ...form, qty: e.target.value })} />
         </div>
-        <button className="btn btn-primary" type="submit">Сохранить товар</button>
+        <button className="btn btn-primary" type="submit" disabled={saving}>
+          {saving ? 'Сохранение...' : 'Сохранить товар'}
+        </button>
       </form>
 
       <h3>Список товаров ({products.length})</h3>
@@ -169,24 +227,24 @@ function ProductsTab() {
 }
 
 // ---------------- Приход ----------------
-function PurchasesTab() {
-  const [purchases, setPurchases] = useState(getPurchases())
-  const [products] = useState(getProducts())
+function PurchasesTab({ products, purchases }) {
   const [form, setForm] = useState({ barcode: '', qty: '', cost: '', supplier: '' })
+  const [saving, setSaving] = useState(false)
 
-  function submit(e) {
+  async function submit(e) {
     e.preventDefault()
     const prod = products.find(p => p.barcode === form.barcode)
     if (!prod || !form.qty) return
-    addPurchase({
+    setSaving(true)
+    await addPurchase(products, {
       barcode: form.barcode,
       name: prod.name,
       qty: Number(form.qty),
       cost: Number(form.cost) || prod.cost || 0,
       supplier: form.supplier,
     })
+    setSaving(false)
     setForm({ barcode: '', qty: '', cost: '', supplier: '' })
-    setPurchases(getPurchases())
   }
 
   return (
@@ -204,7 +262,9 @@ function PurchasesTab() {
         </div>
         <input className="input" placeholder="Поставщик (необязательно)" value={form.supplier}
           onChange={e => setForm({ ...form, supplier: e.target.value })} />
-        <button className="btn btn-primary" type="submit">Оприходовать</button>
+        <button className="btn btn-primary" type="submit" disabled={saving}>
+          {saving ? 'Сохранение...' : 'Оприходовать'}
+        </button>
       </form>
 
       <h3>История прихода</h3>
@@ -222,24 +282,24 @@ function PurchasesTab() {
 }
 
 // ---------------- Долги ----------------
-function DebtsTab() {
-  const [debts, setDebts] = useState(getDebts())
+function DebtsTab({ debts }) {
   const [form, setForm] = useState({ who: '', amount: '', type: 'owed_to_us', comment: '' })
+  const [saving, setSaving] = useState(false)
 
-  function submit(e) {
+  async function submit(e) {
     e.preventDefault()
     if (!form.who || !form.amount) return
-    addDebt({ who: form.who, amount: Number(form.amount), type: form.type, comment: form.comment })
+    setSaving(true)
+    await addDebt({ who: form.who, amount: Number(form.amount), type: form.type, comment: form.comment })
+    setSaving(false)
     setForm({ who: '', amount: '', type: 'owed_to_us', comment: '' })
-    setDebts(getDebts())
   }
 
-  function togglePaid(id) {
-    setDebts(toggleDebtPaid(id))
+  async function togglePaid(id, paid) {
+    await toggleDebtPaid(id, paid)
   }
-  function remove(id) {
-    deleteDebt(id)
-    setDebts(getDebts())
+  async function remove(id) {
+    await deleteDebt(id)
   }
 
   return (
@@ -257,7 +317,9 @@ function DebtsTab() {
         </div>
         <input className="input" placeholder="Комментарий" value={form.comment}
           onChange={e => setForm({ ...form, comment: e.target.value })} />
-        <button className="btn btn-primary" type="submit">Добавить долг</button>
+        <button className="btn btn-primary" type="submit" disabled={saving}>
+          {saving ? 'Сохранение...' : 'Добавить долг'}
+        </button>
       </form>
 
       <div className="list">
@@ -272,7 +334,7 @@ function DebtsTab() {
               </div>
             </div>
             <div className="row-actions">
-              <button className="btn btn-secondary btn-sm" onClick={() => togglePaid(d.id)}>
+              <button className="btn btn-secondary btn-sm" onClick={() => togglePaid(d.id, d.paid)}>
                 {d.paid ? '↺' : '✓'}
               </button>
               <button className="btn btn-danger btn-sm" onClick={() => remove(d.id)}>🗑</button>
