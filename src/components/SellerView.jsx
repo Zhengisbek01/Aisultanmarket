@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import BarcodeScanner from './BarcodeScanner.jsx'
 import { findProductByBarcode, addSale, upsertProduct, formatKZT } from '../store.js'
 
@@ -16,6 +16,16 @@ export default function SellerView({ user }) {
   const [newForm, setNewForm] = useState({ barcode: '', name: '', price: '', cost: '', weight: '', qty: '' })
   const [paymentType, setPaymentType] = useState('cash') // cash | card | debt
   const [debtor, setDebtor] = useState('')
+  const usbInputRef = useRef(null)
+
+  // USB/Bluetooth сканер работает как клавиатура: печатает код и жмёт Enter.
+  // Держим поле ручного ввода в фокусе, когда нет открытой карточки товара — так сканер
+  // может "напечатать" код в любой момент без клика по экрану.
+  useEffect(() => {
+    if (!scanning && addingCode === null && !product && usbInputRef.current) {
+      usbInputRef.current.focus()
+    }
+  }, [scanning, addingCode, product, lastSale])
 
   function handleFound(code, err) {
     setScanning(false)
@@ -120,13 +130,17 @@ export default function SellerView({ user }) {
 
       <form onSubmit={handleManualSubmit} className="manual-row">
         <input
+          ref={usbInputRef}
           className="input"
-          placeholder="Или введите штрих-код вручную"
+          placeholder="Штрих-код (USB-сканер печатает сюда автоматически)"
           value={manualCode}
           onChange={e => setManualCode(e.target.value)}
         />
         <button className="btn btn-secondary" type="submit">Найти</button>
       </form>
+      <p className="hint" style={{ marginTop: -6, marginBottom: 12 }}>
+        Подключите USB/Bluetooth сканер — просто наведите на штрих-код и нажмите на курок, код появится в поле выше и найдётся автоматически.
+      </p>
 
       {notFound && (
         <div>
