@@ -45,6 +45,9 @@ function ReportTab() {
         <Stat label="Приход (закупки)" value={formatKZT(r.purchaseTotal)} />
         <Stat label="Себестоимость проданного" value={formatKZT(r.costOfGoodsSold)} />
         <Stat label="Чистая прибыль" value={formatKZT(r.netProfit)} tone={r.netProfit >= 0 ? 'good' : 'bad'} />
+        <Stat label="💵 Наличные" value={formatKZT(r.cashIncome)} />
+        <Stat label="💳 Безналичные" value={formatKZT(r.cardIncome)} />
+        <Stat label="📝 Продано в долг" value={formatKZT(r.debtIncome)} tone="bad" />
         <Stat label="Нам должны" value={formatKZT(r.debtsOwedToUs)} tone="good" />
         <Stat label="Мы должны" value={formatKZT(r.debtsWeOwe)} tone="bad" />
       </div>
@@ -53,7 +56,12 @@ function ReportTab() {
       <div className="list">
         {[...r.sales].reverse().slice(0, 15).map(s => (
           <div className="list-row" key={s.id}>
-            <span>{s.name} × {s.qty}</span>
+            <span>
+              {s.name} × {s.qty}
+              {s.paymentType === 'cash' && ' · 💵'}
+              {s.paymentType === 'card' && ' · 💳'}
+              {s.paymentType === 'debt' && ` · 📝 ${s.debtor}`}
+            </span>
             <b>{formatKZT(s.total)}</b>
           </div>
         ))}
