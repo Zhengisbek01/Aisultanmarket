@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect } from 'react'
 import BarcodeScanner from './BarcodeScanner.jsx'
-import { findProductByBarcode, addSale, upsertProduct, formatKZT } from '../store.js'
+import { useProducts, findProduct, addSale, upsertProduct, refundSale, formatKZT } from '../store.js'
 
 export default function SellerView({ user }) {
+  const { data: products, loading, error } = useProducts()
+
   const [scanning, setScanning] = useState(false)
   const [scanForBarcodeField, setScanForBarcodeField] = useState(false)
   const [manualCode, setManualCode] = useState('')
@@ -16,16 +18,18 @@ export default function SellerView({ user }) {
   const [newForm, setNewForm] = useState({ barcode: '', name: '', price: '', cost: '', weight: '', qty: '' })
   const [paymentType, setPaymentType] = useState('cash') // cash | card | debt
   const [debtor, setDebtor] = useState('')
+  const [universalMode, setUniversalMode] = useState(false)
+  const [universalForm, setUniversalForm] = useState({ name: '', price: '' })
+  const [saving, setSaving] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const usbInputRef = useRef(null)
 
   // USB/Bluetooth сканер работает как клавиатура: печатает код и жмёт Enter.
-  // Держим поле ручного ввода в фокусе, когда нет открытой карточки товара — так сканер
-  // может "напечатать" код в любой момент без клика по экрану.
   useEffect(() => {
-    if (!scanning && addingCode === null && !product && usbInputRef.current) {
+    if (!scanning && addingCode === null && !universalMode && !product && usbInputRef.current) {
       usbInputRef.current.focus()
     }
-  }, [scanning, addingCode, product, lastSale])
+  }, [scanning, addingCode, universalMode, product, lastSale])
 
   function handleFound(code, err) {
     setScanning(false)
@@ -45,10 +49,11 @@ export default function SellerView({ user }) {
     setCameraError('')
     setLastSale(null)
     setAddingCode(null)
+    setUniversalMode(false)
     setLastTriedCode(code)
     setPaymentType('cash')
     setDebtor('')
-    const p = findProductByBarcode(code)
+    const p = findProduct(products, code)
     if (p) {
       setProduct(p)
       setQty(1)
@@ -70,13 +75,15 @@ export default function SellerView({ user }) {
   function startAdd(code) {
     setProduct(null)
     setNotFound('')
+    setUniversalMode(false)
     setAddingCode(code)
     setNewForm({ barcode: code, name: '', price: '', cost: '', weight: '', qty: '' })
   }
 
-  function saveNewProduct(e) {
+  async function saveNewProduct(e) {
     e.preventDefault()
     if (!newForm.barcode || !newForm.name || !newForm.price) return
+    setSaving(true)
     const item = {
       barcode: newForm.barcode,
       name: newForm.name,
@@ -85,17 +92,42 @@ export default function SellerView({ user }) {
       weight: newForm.weight,
       qty: Number(newForm.qty) || 0,
     }
-    upsertProduct(item)
+    await upsertProduct(item)
+    setSaving(false)
     setAddingCode(null)
     setProduct(item)
     setQty(1)
   }
 
-  function completeSale() {
+  function startUniversal() {
+    setProduct(null)
+    setNotFound('')
+    setAddingCode(null)
+    setUniversalMode(true)
+    setUniversalForm({ name: '', price: '' })
+  }
+
+  function startUniversalSale(e) {
+    e.preventDefault()
+    if (!universalForm.price) return
+    setProduct({
+      barcode: 'без-штрихкода',
+      name: universalForm.name.trim() || 'Товар без штрих-кода',
+      price: Number(universalForm.price),
+      isUniversal: true,
+    })
+    setQty(1)
+    setUniversalMode(false)
+    setPaymentType('cash')
+    setDebtor('')
+  }
+
+  async function completeSale() {
     if (!product || qty <= 0) return
     if (paymentType === 'debt' && !debtor.trim()) return
+    setSaving(true)
     const total = product.price * qty
-    const record = addSale({
+    const record = await addSale(products, {
       barcode: product.barcode,
       name: product.name,
       price: product.price,
@@ -105,6 +137,7 @@ export default function SellerView({ user }) {
       paymentType,
       debtor: paymentType === 'debt' ? debtor.trim() : '',
     })
+    setSaving(false)
     setLastSale(record)
     setProduct(null)
     setQty(1)
@@ -112,10 +145,21 @@ export default function SellerView({ user }) {
     setDebtor('')
   }
 
+  async function cancelLastSale() {
+    if (!lastSale) return
+    if (!confirm(`Отменить последнюю продажу «${lastSale.name}» на сумму ${formatKZT(lastSale.total)}?`)) return
+    setCancelling(true)
+    await refundSale(lastSale, products)
+    setCancelling(false)
+    setLastSale(null)
+  }
+
   return (
     <div className="view">
       <h2>Продажа</h2>
 
+      {error && <div className="error-text">{error}</div>}
+      {loading && <p className="hint">Подключение к общей базе...</p>}
       {cameraError && <div className="error-text">{cameraError}</div>}
 
       <div className="scan-actions">
@@ -124,9 +168,14 @@ export default function SellerView({ user }) {
         </button>
       </div>
 
-      <button className="btn btn-secondary" style={{ width: '100%', marginBottom: 12 }} onClick={() => startAdd('')}>
-        ➕ Внести новый товар вручную
-      </button>
+      <div className="manual-row" style={{ marginBottom: 12 }}>
+        <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => startAdd('')}>
+          ➕ Внести новый товар
+        </button>
+        <button className="btn btn-secondary" style={{ flex: 1 }} onClick={startUniversal}>
+          🏷 Товар без штрих-кода
+        </button>
+      </div>
 
       <form onSubmit={handleManualSubmit} className="manual-row">
         <input
@@ -139,7 +188,7 @@ export default function SellerView({ user }) {
         <button className="btn btn-secondary" type="submit">Найти</button>
       </form>
       <p className="hint" style={{ marginTop: -6, marginBottom: 12 }}>
-        Подключите USB/Bluetooth сканер — просто наведите на штрих-код и нажмите на курок, код появится в поле выше и найдётся автоматически.
+        Подключите USB/Bluetooth сканер — код появится в поле выше и найдётся автоматически.
       </p>
 
       {notFound && (
@@ -147,6 +196,30 @@ export default function SellerView({ user }) {
           <div className="error-text">{notFound}</div>
           <button className="btn btn-secondary" onClick={() => startAdd(lastTriedCode)}>➕ Внести этот товар</button>
         </div>
+      )}
+
+      {universalMode && (
+        <form className="card-form" onSubmit={startUniversalSale}>
+          <p className="hint" style={{ marginTop: 0 }}>
+            Для товара без штрих-кода (вес, развес, штучный товар без упаковки) — укажите цену прямо сейчас.
+            Такой товар не хранится в каталоге и не влияет на складские остатки.
+          </p>
+          <input
+            className="input"
+            placeholder="Название (необязательно)"
+            value={universalForm.name}
+            onChange={e => setUniversalForm({ ...universalForm, name: e.target.value })}
+            autoFocus
+          />
+          <input
+            className="input"
+            placeholder="Цена, ₸"
+            type="number"
+            value={universalForm.price}
+            onChange={e => setUniversalForm({ ...universalForm, price: e.target.value })}
+          />
+          <button className="btn btn-primary" type="submit">Продолжить</button>
+        </form>
       )}
 
       {addingCode !== null && (
@@ -183,7 +256,9 @@ export default function SellerView({ user }) {
             <input className="input" placeholder="Остаток, шт" type="number" value={newForm.qty}
               onChange={e => setNewForm({ ...newForm, qty: e.target.value })} />
           </div>
-          <button className="btn btn-primary" type="submit">Сохранить и продать</button>
+          <button className="btn btn-primary" type="submit" disabled={saving}>
+            {saving ? 'Сохранение...' : 'Сохранить и продать'}
+          </button>
         </form>
       )}
 
@@ -192,7 +267,9 @@ export default function SellerView({ user }) {
           <h3>{product.name}</h3>
           <div className="product-row"><span>Цена</span><b>{formatKZT(product.price)}</b></div>
           {product.weight && <div className="product-row"><span>Вес/объём</span><b>{product.weight}</b></div>}
-          <div className="product-row"><span>На складе</span><b>{product.qty ?? 0} шт</b></div>
+          {!product.isUniversal && (
+            <div className="product-row"><span>На складе</span><b>{product.qty ?? 0} шт</b></div>
+          )}
           <div className="qty-row">
             <label>Количество:</label>
             <button className="btn btn-round" onClick={() => setQty(q => Math.max(1, q - 1))}>−</button>
@@ -210,21 +287,9 @@ export default function SellerView({ user }) {
           <div className="pay-row">
             <label>Оплата:</label>
             <div className="pay-options">
-              <button
-                type="button"
-                className={`pay-btn ${paymentType === 'cash' ? 'pay-btn-active' : ''}`}
-                onClick={() => setPaymentType('cash')}
-              >💵 Наличные</button>
-              <button
-                type="button"
-                className={`pay-btn ${paymentType === 'card' ? 'pay-btn-active' : ''}`}
-                onClick={() => setPaymentType('card')}
-              >💳 Безнал</button>
-              <button
-                type="button"
-                className={`pay-btn ${paymentType === 'debt' ? 'pay-btn-active' : ''}`}
-                onClick={() => setPaymentType('debt')}
-              >📝 В долг</button>
+              <button type="button" className={`pay-btn ${paymentType === 'cash' ? 'pay-btn-active' : ''}`} onClick={() => setPaymentType('cash')}>💵 Наличные</button>
+              <button type="button" className={`pay-btn ${paymentType === 'card' ? 'pay-btn-active' : ''}`} onClick={() => setPaymentType('card')}>💳 Безнал</button>
+              <button type="button" className={`pay-btn ${paymentType === 'debt' ? 'pay-btn-active' : ''}`} onClick={() => setPaymentType('debt')}>📝 В долг</button>
             </div>
           </div>
 
@@ -240,9 +305,9 @@ export default function SellerView({ user }) {
           <button
             className="btn btn-success btn-big"
             onClick={completeSale}
-            disabled={paymentType === 'debt' && !debtor.trim()}
+            disabled={saving || (paymentType === 'debt' && !debtor.trim())}
           >
-            Оформить продажу
+            {saving ? 'Оформление...' : 'Оформить продажу'}
           </button>
         </div>
       )}
@@ -253,6 +318,11 @@ export default function SellerView({ user }) {
           {lastSale.paymentType === 'cash' && ' · 💵 наличные'}
           {lastSale.paymentType === 'card' && ' · 💳 безнал'}
           {lastSale.paymentType === 'debt' && ` · 📝 в долг (${lastSale.debtor})`}
+          <div style={{ marginTop: 10 }}>
+            <button className="btn btn-danger btn-sm" disabled={cancelling} onClick={cancelLastSale}>
+              {cancelling ? 'Отмена...' : '↩️ Отменить эту продажу'}
+            </button>
+          </div>
         </div>
       )}
 
