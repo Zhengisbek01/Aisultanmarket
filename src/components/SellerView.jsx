@@ -14,6 +14,8 @@ export default function SellerView({ user }) {
   const [lastTriedCode, setLastTriedCode] = useState('')
   const [addingCode, setAddingCode] = useState(null) // null = закрыто, '' = ручной ввод кода, 'XXXX' = код известен
   const [newForm, setNewForm] = useState({ barcode: '', name: '', price: '', cost: '', weight: '', qty: '' })
+  const [paymentType, setPaymentType] = useState('cash') // cash | card | debt
+  const [debtor, setDebtor] = useState('')
 
   function handleFound(code, err) {
     setScanning(false)
@@ -34,6 +36,8 @@ export default function SellerView({ user }) {
     setLastSale(null)
     setAddingCode(null)
     setLastTriedCode(code)
+    setPaymentType('cash')
+    setDebtor('')
     const p = findProductByBarcode(code)
     if (p) {
       setProduct(p)
@@ -79,6 +83,7 @@ export default function SellerView({ user }) {
 
   function completeSale() {
     if (!product || qty <= 0) return
+    if (paymentType === 'debt' && !debtor.trim()) return
     const total = product.price * qty
     const record = addSale({
       barcode: product.barcode,
@@ -87,10 +92,14 @@ export default function SellerView({ user }) {
       qty,
       total,
       sellerName: user.name,
+      paymentType,
+      debtor: paymentType === 'debt' ? debtor.trim() : '',
     })
     setLastSale(record)
     setProduct(null)
     setQty(1)
+    setPaymentType('cash')
+    setDebtor('')
   }
 
   return (
@@ -183,13 +192,53 @@ export default function SellerView({ user }) {
             <button className="btn btn-round" onClick={() => setQty(q => q + 1)}>+</button>
           </div>
           <div className="product-row total-row"><span>Итого</span><b>{formatKZT(product.price * qty)}</b></div>
-          <button className="btn btn-success btn-big" onClick={completeSale}>Оформить продажу</button>
+
+          <div className="pay-row">
+            <label>Оплата:</label>
+            <div className="pay-options">
+              <button
+                type="button"
+                className={`pay-btn ${paymentType === 'cash' ? 'pay-btn-active' : ''}`}
+                onClick={() => setPaymentType('cash')}
+              >💵 Наличные</button>
+              <button
+                type="button"
+                className={`pay-btn ${paymentType === 'card' ? 'pay-btn-active' : ''}`}
+                onClick={() => setPaymentType('card')}
+              >💳 Безнал</button>
+              <button
+                type="button"
+                className={`pay-btn ${paymentType === 'debt' ? 'pay-btn-active' : ''}`}
+                onClick={() => setPaymentType('debt')}
+              >📝 В долг</button>
+            </div>
+          </div>
+
+          {paymentType === 'debt' && (
+            <input
+              className="input"
+              placeholder="Кто берёт в долг (имя)"
+              value={debtor}
+              onChange={e => setDebtor(e.target.value)}
+            />
+          )}
+
+          <button
+            className="btn btn-success btn-big"
+            onClick={completeSale}
+            disabled={paymentType === 'debt' && !debtor.trim()}
+          >
+            Оформить продажу
+          </button>
         </div>
       )}
 
       {lastSale && (
         <div className="success-banner">
           ✅ Продано: {lastSale.name} × {lastSale.qty} = {formatKZT(lastSale.total)}
+          {lastSale.paymentType === 'cash' && ' · 💵 наличные'}
+          {lastSale.paymentType === 'card' && ' · 💳 безнал'}
+          {lastSale.paymentType === 'debt' && ` · 📝 в долг (${lastSale.debtor})`}
         </div>
       )}
 
