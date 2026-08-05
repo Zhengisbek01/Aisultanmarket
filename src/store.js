@@ -1,3 +1,4 @@
+
 // Простое хранилище на localStorage. Один магазин = один браузер/устройство.
 // Роли: admin (руководитель) — видит отчёты; seller (продавец) — только сканирует и продаёт.
 
@@ -84,7 +85,7 @@ export function getSales() {
 }
 export function addSale(sale) {
   const sales = getSales()
-  const record = { id: uid(), date: new Date().toISOString(), ...sale }
+  const record = { id: uid(), date: new Date().toISOString(), paymentType: 'cash', debtor: '', ...sale }
   sales.push(record)
   write(KEYS.sales, sales)
   // списываем со склада
@@ -93,6 +94,16 @@ export function addSale(sale) {
   if (idx >= 0) {
     products[idx].qty = Math.max(0, (products[idx].qty || 0) - (sale.qty || 1))
     saveProducts(products)
+  }
+  // если продажа в долг — сразу заводим запись в долгах
+  if (record.paymentType === 'debt' && record.debtor) {
+    addDebt({
+      who: record.debtor,
+      amount: record.total,
+      type: 'owed_to_us',
+      comment: `Долг за товар: ${record.name} × ${record.qty}`,
+      saleId: record.id,
+    })
   }
   return record
 }
@@ -152,6 +163,9 @@ export function getReport(fromDate, toDate) {
   const products = getProducts()
 
   const income = sales.reduce((sum, s) => sum + (s.total || 0), 0)
+  const cashIncome = sales.filter(s => (s.paymentType || 'cash') === 'cash').reduce((sum, s) => sum + (s.total || 0), 0)
+  const cardIncome = sales.filter(s => s.paymentType === 'card').reduce((sum, s) => sum + (s.total || 0), 0)
+  const debtIncome = sales.filter(s => s.paymentType === 'debt').reduce((sum, s) => sum + (s.total || 0), 0)
   const purchaseTotal = purchases.reduce((sum, p) => sum + ((p.cost || 0) * (p.qty || 0)), 0)
 
   // себестоимость проданного товара (для чистой прибыли)
@@ -169,6 +183,9 @@ export function getReport(fromDate, toDate) {
 
   return {
     income,
+    cashIncome,
+    cardIncome,
+    debtIncome,
     purchaseTotal,
     costOfGoodsSold,
     netProfit,
