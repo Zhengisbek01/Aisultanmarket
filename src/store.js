@@ -1,199 +1,175 @@
+// Общая база данных на Firebase Firestore — товары, продажи, приход и долги
+// синхронизируются в реальном времени между всеми устройствами (телефон продавца,
+// телефон/компьютер руководителя). Логин пользователей остаётся локальным —
+// он не требует синхронизации, роли и пароли задаются один раз в коде ниже.
 
-// Простое хранилище на localStorage. Один магазин = один браузер/устройство.
-// Роли: admin (руководитель) — видит отчёты; seller (продавец) — только сканирует и продаёт.
+import { useEffect, useState } from 'react'
+import { db } from './firebase.js'
+import {
+  collection, doc, onSnapshot, addDoc, setDoc, updateDoc, deleteDoc,
+  increment, query, orderBy,
+} from 'firebase/firestore'
 
-const KEYS = {
-  products: 'shop_products',
-  sales: 'shop_sales',
-  purchases: 'shop_purchases',
-  debts: 'shop_debts',
-  users: 'shop_users',
-  session: 'shop_session',
-}
-
-function read(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key)
-    return raw ? JSON.parse(raw) : fallback
-  } catch {
-    return fallback
-  }
-}
-function write(key, value) {
-  localStorage.setItem(key, JSON.stringify(value))
-}
-function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
-}
-
-// ---------- Пользователи ----------
-export function getUsers() {
-  let users = read(KEYS.users, null)
-  if (!users) {
-    users = [
-      { login: 'admin', password: '1234', role: 'admin', name: 'Руководитель' },
-      { login: 'seller', password: '1111', role: 'seller', name: 'Продавец' },
-    ]
-    write(KEYS.users, users)
-  }
-  return users
-}
-export function saveUsers(users) {
-  write(KEYS.users, users)
-}
+// ---------- Пользователи (локально на устройстве) ----------
+const USERS = [
+  { login: 'admin', password: '1234', role: 'admin', name: 'Руководитель' },
+  { login: 'seller', password: '1111', role: 'seller', name: 'Продавец' },
+]
 export function login(loginVal, password) {
-  const users = getUsers()
-  const user = users.find(u => u.login === loginVal && u.password === password)
-  if (user) write(KEYS.session, user)
+  const user = USERS.find(u => u.login === loginVal && u.password === password)
+  if (user) localStorage.setItem('shop_session', JSON.stringify(user))
   return user || null
 }
 export function logout() {
-  localStorage.removeItem(KEYS.session)
+  localStorage.removeItem('shop_session')
 }
 export function getSession() {
-  return read(KEYS.session, null)
+  try { return JSON.parse(localStorage.getItem('shop_session')) } catch { return null }
 }
+
+// ---------- Живые подписки на коллекции Firestore ----------
+function useLiveCollection(name, orderField) {
+  const [data, setData] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const ref = collection(db, name)
+    const q = orderField ? query(ref, orderBy(orderField)) : ref
+    const unsub = onSnapshot(
+      q,
+      snap => {
+        setData(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+        setLoading(false)
+      },
+      err => {
+        console.error(`Firestore (${name}):`, err)
+        setError('Не удалось подключиться к общей базе. Проверьте настройки Firebase в src/firebase.js')
+        setLoading(false)
+      }
+    )
+    return unsub
+  }, [name, orderField])
+
+  return { data, loading, error }
+}
+
+export function useProducts() { return useLiveCollection('products') }
+export function useSales() { return useLiveCollection('sales', 'date') }
+export function usePurchases() { return useLiveCollection('purchases', 'date') }
+export function useDebts() { return useLiveCollection('debts', 'date') }
 
 // ---------- Товары ----------
-export function getProducts() {
-  return read(KEYS.products, [])
+export function findProduct(products, barcode) {
+  return products.find(p => p.barcode === barcode) || null
 }
-export function saveProducts(products) {
-  write(KEYS.products, products)
+export async function upsertProduct(product) {
+  await setDoc(doc(db, 'products', product.barcode), { qty: 0, cost: 0, ...product }, { merge: true })
 }
-export function findProductByBarcode(barcode) {
-  return getProducts().find(p => p.barcode === barcode) || null
-}
-export function upsertProduct(product) {
-  const products = getProducts()
-  const idx = products.findIndex(p => p.barcode === product.barcode)
-  if (idx >= 0) {
-    products[idx] = { ...products[idx], ...product }
-  } else {
-    products.push({ id: uid(), qty: 0, cost: 0, ...product })
-  }
-  saveProducts(products)
-  return products
-}
-export function deleteProduct(barcode) {
-  saveProducts(getProducts().filter(p => p.barcode !== barcode))
+export async function deleteProduct(barcode) {
+  await deleteDoc(doc(db, 'products', barcode))
 }
 
-// ---------- Продажи (доход) ----------
-export function getSales() {
-  return read(KEYS.sales, [])
-}
-export function addSale(sale) {
-  const sales = getSales()
-  const record = { id: uid(), date: new Date().toISOString(), paymentType: 'cash', debtor: '', ...sale }
-  sales.push(record)
-  write(KEYS.sales, sales)
-  // списываем со склада
-  const products = getProducts()
-  const idx = products.findIndex(p => p.barcode === sale.barcode)
-  if (idx >= 0) {
-    products[idx].qty = Math.max(0, (products[idx].qty || 0) - (sale.qty || 1))
-    saveProducts(products)
+// ---------- Продажи ----------
+export async function addSale(products, sale) {
+  const record = { date: new Date().toISOString(), paymentType: 'cash', debtor: '', refunded: false, ...sale }
+  const saleRef = await addDoc(collection(db, 'sales'), record)
+
+  // списываем со склада, только если это реальный товар из каталога (не универсальная продажа)
+  const prod = products.find(p => p.barcode === sale.barcode)
+  if (prod) {
+    await updateDoc(doc(db, 'products', prod.barcode), { qty: increment(-(sale.qty || 1)) })
   }
-  // если продажа в долг — сразу заводим запись в долгах
+
+  // продажа в долг — сразу заводим запись в долгах, и привязываем её к продаже
+  let debtId = null
   if (record.paymentType === 'debt' && record.debtor) {
-    addDebt({
+    const debtRef = await addDebt({
       who: record.debtor,
       amount: record.total,
       type: 'owed_to_us',
       comment: `Долг за товар: ${record.name} × ${record.qty}`,
-      saleId: record.id,
+      saleId: saleRef.id,
     })
+    debtId = debtRef.id
+    await updateDoc(saleRef, { debtId })
   }
-  return record
+  return { id: saleRef.id, ...record, debtId }
 }
 
-// ---------- Приход (закупки) ----------
-export function getPurchases() {
-  return read(KEYS.purchases, [])
-}
-export function addPurchase(purchase) {
-  const purchases = getPurchases()
-  const record = { id: uid(), date: new Date().toISOString(), ...purchase }
-  purchases.push(record)
-  write(KEYS.purchases, purchases)
-  // приходуем на склад
-  const products = getProducts()
-  const idx = products.findIndex(p => p.barcode === purchase.barcode)
-  if (idx >= 0) {
-    products[idx].qty = (products[idx].qty || 0) + (purchase.qty || 0)
-    if (purchase.cost) products[idx].cost = purchase.cost
-    saveProducts(products)
+// Отмена / возврат продажи: возвращает товар на склад (если это не универсальный товар
+// без штрих-кода), удаляет связанный долг (если продажа была "в долг") и помечает
+// продажу как возвращённую — она остаётся в истории, но не учитывается в доходе и прибыли.
+export async function refundSale(sale, products) {
+  await updateDoc(doc(db, 'sales', sale.id), { refunded: true, refundedAt: new Date().toISOString() })
+  const prod = products.find(p => p.barcode === sale.barcode)
+  if (prod) {
+    await updateDoc(doc(db, 'products', prod.barcode), { qty: increment(sale.qty || 1) })
   }
-  return record
+  if (sale.debtId) {
+    await deleteDoc(doc(db, 'debts', sale.debtId)).catch(() => {})
+  }
+}
+
+// ---------- Приход ----------
+export async function addPurchase(products, purchase) {
+  const record = { date: new Date().toISOString(), ...purchase }
+  await addDoc(collection(db, 'purchases'), record)
+  const prod = products.find(p => p.barcode === purchase.barcode)
+  if (prod) {
+    const updates = { qty: increment(purchase.qty || 0) }
+    if (purchase.cost) updates.cost = purchase.cost
+    await updateDoc(doc(db, 'products', prod.barcode), updates)
+  }
 }
 
 // ---------- Долги ----------
-export function getDebts() {
-  return read(KEYS.debts, [])
+export async function addDebt(debt) {
+  return await addDoc(collection(db, 'debts'), { date: new Date().toISOString(), paid: false, ...debt })
 }
-export function addDebt(debt) {
-  const debts = getDebts()
-  const record = { id: uid(), date: new Date().toISOString(), paid: false, ...debt }
-  debts.push(record)
-  write(KEYS.debts, debts)
-  return record
+export async function toggleDebtPaid(id, currentPaid) {
+  await updateDoc(doc(db, 'debts', id), { paid: !currentPaid })
 }
-export function toggleDebtPaid(id) {
-  const debts = getDebts()
-  const idx = debts.findIndex(d => d.id === id)
-  if (idx >= 0) debts[idx].paid = !debts[idx].paid
-  write(KEYS.debts, debts)
-  return debts
-}
-export function deleteDebt(id) {
-  write(KEYS.debts, getDebts().filter(d => d.id !== id))
+export async function deleteDebt(id) {
+  await deleteDoc(doc(db, 'debts', id))
 }
 
-// ---------- Отчётность ----------
-export function getReport(fromDate, toDate) {
+// ---------- Отчётность (считаем на клиенте из живых данных) ----------
+export function computeReport(products, sales, purchases, debts, fromDate, toDate) {
   const inRange = (iso) => {
     const t = new Date(iso).getTime()
     if (fromDate && t < new Date(fromDate).getTime()) return false
     if (toDate && t > new Date(toDate).getTime() + 86400000) return false
     return true
   }
-  const sales = getSales().filter(s => inRange(s.date))
-  const purchases = getPurchases().filter(p => inRange(p.date))
-  const products = getProducts()
+  const salesInRange = sales.filter(s => inRange(s.date))
+  const salesF = salesInRange.filter(s => !s.refunded) // без учёта возвратов
+  const purchasesF = purchases.filter(p => inRange(p.date))
 
-  const income = sales.reduce((sum, s) => sum + (s.total || 0), 0)
-  const cashIncome = sales.filter(s => (s.paymentType || 'cash') === 'cash').reduce((sum, s) => sum + (s.total || 0), 0)
-  const cardIncome = sales.filter(s => s.paymentType === 'card').reduce((sum, s) => sum + (s.total || 0), 0)
-  const debtIncome = sales.filter(s => s.paymentType === 'debt').reduce((sum, s) => sum + (s.total || 0), 0)
-  const purchaseTotal = purchases.reduce((sum, p) => sum + ((p.cost || 0) * (p.qty || 0)), 0)
+  const income = salesF.reduce((sum, s) => sum + (s.total || 0), 0)
+  const cashIncome = salesF.filter(s => (s.paymentType || 'cash') === 'cash').reduce((s2, s) => s2 + (s.total || 0), 0)
+  const cardIncome = salesF.filter(s => s.paymentType === 'card').reduce((s2, s) => s2 + (s.total || 0), 0)
+  const debtIncome = salesF.filter(s => s.paymentType === 'debt').reduce((s2, s) => s2 + (s.total || 0), 0)
+  const purchaseTotal = purchasesF.reduce((sum, p) => sum + ((p.cost || 0) * (p.qty || 0)), 0)
 
-  // себестоимость проданного товара (для чистой прибыли)
-  const costOfGoodsSold = sales.reduce((sum, s) => {
+  const costOfGoodsSold = salesF.reduce((sum, s) => {
     const prod = products.find(p => p.barcode === s.barcode)
     const cost = prod ? (prod.cost || 0) : 0
     return sum + cost * (s.qty || 1)
   }, 0)
-
   const netProfit = income - costOfGoodsSold
 
-  const debts = getDebts()
   const debtsWeOwe = debts.filter(d => d.type === 'we_owe' && !d.paid).reduce((s, d) => s + d.amount, 0)
   const debtsOwedToUs = debts.filter(d => d.type === 'owed_to_us' && !d.paid).reduce((s, d) => s + d.amount, 0)
+  const refundedCount = salesInRange.filter(s => s.refunded).length
 
   return {
-    income,
-    cashIncome,
-    cardIncome,
-    debtIncome,
-    purchaseTotal,
-    costOfGoodsSold,
-    netProfit,
-    debtsWeOwe,
-    debtsOwedToUs,
-    salesCount: sales.length,
-    sales,
-    purchases,
+    income, cashIncome, cardIncome, debtIncome,
+    purchaseTotal, costOfGoodsSold, netProfit,
+    debtsWeOwe, debtsOwedToUs,
+    salesCount: salesF.length,
+    refundedCount,
+    sales: salesF, purchases: purchasesF,
   }
 }
 
