@@ -141,3 +141,36 @@ body {
 .paid { text-decoration: line-through; opacity: .6; }
 
 h3 { font-size: 15px; color: #cfd9e2; margin: 20px 0 10px; }
+
+/* ---------- Адаптация под ноутбук / широкий экран ---------- */
+@media (min-width: 900px) {
+  .app-main { max-width: 1100px; padding: 28px 32px; }
+  .app-header { padding: 18px 32px; }
+
+  .stat-grid { grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .list-row, .list-row-full { padding: 14px 16px; }
+
+  .card-form { padding: 22px; max-width: 560px; }
+  .card-form .manual-row { gap: 12px; }
+
+  .product-card { max-width: 480px; padding: 22px; }
+
+  .scanner-box { max-width: 480px; }
+
+  .view > form.card-form,
+  .view > .product-card {
+    margin-left: 0;
+  }
+
+  .tabs { gap: 8px; }
+  .tab { padding: 9px 18px; font-size: 14px; }
+
+  .login-card { max-width: 400px; padding: 40px 36px; }
+}
+
+@media (min-width: 1300px) {
+  .app-main { max-width: 1300px; }
+  .stat-grid { grid-template-columns: repeat(4, 1fr); }
+  .list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .list-row-full { display: flex; }
+}
