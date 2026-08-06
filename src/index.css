@@ -157,6 +157,7 @@ h3 { font-size: 15px; color: #cfd9e2; margin: 20px 0 10px; }
 
   .scanner-box { max-width: 480px; }
 
+  /* формы и карточка товара рядом на широком экране, а не только столбиком */
   .view > form.card-form,
   .view > .product-card {
     margin-left: 0;
@@ -173,4 +174,28 @@ h3 { font-size: 15px; color: #cfd9e2; margin: 20px 0 10px; }
   .stat-grid { grid-template-columns: repeat(4, 1fr); }
   .list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .list-row-full { display: flex; }
+}
+
+/* ---------- Корзина товаров (таблица при продаже нескольких позиций) ---------- */
+.cart-card {
+  background: #16212c; border: 1px solid #223140; border-radius: 14px;
+  padding: 14px; margin: 16px 0;
+}
+.cart-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.cart-table th {
+  text-align: left; color: #8fa3b3; font-weight: 500; font-size: 11px;
+  padding: 4px 6px 8px; border-bottom: 1px solid #223140; white-space: nowrap;
+}
+.cart-table td { padding: 8px 6px; border-bottom: 1px dashed #223140; vertical-align: middle; white-space: nowrap; }
+.cart-table tr:last-child td { border-bottom: none; }
+.cart-qty { display: flex; align-items: center; gap: 6px; }
+.cart-qty button {
+  width: 24px; height: 24px; border-radius: 50%; border: none;
+  background: #223140; color: #fff; font-size: 14px; cursor: pointer; flex-shrink: 0;
+}
+.cart-qty span { min-width: 16px; text-align: center; }
+.cart-remove { background: none; border: none; color: #ff8080; font-size: 15px; cursor: pointer; padding: 4px; }
+.cart-total-row {
+  display: flex; justify-content: space-between; padding: 12px 6px 4px;
+  font-size: 17px; font-weight: 700; border-top: 1px solid #223140; margin-top: 8px;
 }
